@@ -3,8 +3,6 @@ import { StyleSheet, View, Text, TouchableOpacity, Dimensions } from 'react-nati
 import { GLView } from 'expo-gl';
 import { StatusBar } from 'expo-status-bar';
 
-const { width, height } = Dimensions.get('window');
-
 const VERTEX_SHADER = `
 attribute vec2 position;
 varying vec2 vUv;
@@ -25,21 +23,12 @@ uniform int fractalType;
 uniform vec2 juliaC;
 uniform vec3 rotation;
 
-// Beautiful color palette
+// Cosine palette - beautiful colors
 vec3 palette(float t) {
   vec3 a = vec3(0.5, 0.5, 0.5);
   vec3 b = vec3(0.5, 0.5, 0.5);
   vec3 c = vec3(1.0, 1.0, 1.0);
-  vec3 d = vec3(0.263, 0.416, 0.557);
-  return a + b * cos(6.28318 * (c * t + d));
-}
-
-vec3 palette2(float t) {
-  // Deep space blues and purples
-  vec3 a = vec3(0.5, 0.5, 0.5);
-  vec3 b = vec3(0.5, 0.5, 0.5);
-  vec3 c = vec3(2.0, 1.0, 1.0);
-  vec3 d = vec3(0.5, 0.20, 0.25);
+  vec3 d = vec3(0.0, 0.33, 0.67);
   return a + b * cos(6.28318 * (c * t + d));
 }
 
@@ -62,41 +51,40 @@ void main() {
   vec2 uv = (vUv - 0.5) * 2.0;
   uv.x *= resolution.x / resolution.y;
   
-  // 3D perspective projection
-  float fov = 1.5;
-  float z = fov / zoom;
-  
   // Apply 3D rotation
-  vec3 p = vec3(uv, z);
+  vec3 p = vec3(uv, 1.0 / zoom);
   p = rotateX(rotation.x) * rotateY(rotation.y) * rotateZ(rotation.z) * p;
   
-  // Perspective divide for true 3D feel
-  float persp = 1.0 / (p.z + 2.0);
-  vec2 c = p.xy * persp * 0.8 + center;
+  // Perspective projection
+  float persp = 1.0 / (p.z + 1.5);
+  vec2 c = p.xy * persp * 1.2 + center;
   
-  vec2 z2 = vec2(0.0);
+  // Initialize
+  vec2 z = vec2(0.0);
   vec2 m = c;
   
   if (fractalType == 1) {
-    z2 = c;
+    z = c;
     m = juliaC;
   } else if (fractalType == 2) {
-    z2 = c;
+    z = c;
     m = c;
   }
   
-  float maxIter = 200.0;
+  float maxIter = 120.0;
   float iter = 0.0;
   
-  for (float i = 0.0; i < 200.0; i++) {
+  // Main fractal iteration
+  for (float i = 0.0; i < 120.0; i++) {
     if (fractalType == 2) {
       // Burning Ship
-      z2 = vec2(z2.x*z2.x - z2.y*z2.y, abs(2.0*z2.x*z2.y)) + m;
+      z = vec2(z.x*z.x - z.y*z.y, abs(2.0*z.x*z.y)) + m;
     } else {
-      z2 = vec2(z2.x*z2.x - z2.y*z2.y, 2.0*z2.x*z2.y) + m;
+      // Mandelbrot / Julia
+      z = vec2(z.x*z.x - z.y*z.y, 2.0*z.x*z.y) + m;
     }
     
-    if (dot(z2, z2) > 256.0) {
+    if (dot(z, z) > 64.0) {
       iter = i;
       break;
     }
@@ -106,39 +94,34 @@ void main() {
   vec3 col;
   
   if (iter >= maxIter - 1.0) {
-    // Inside the set - deep black
+    // Inside - dark
     col = vec3(0.0, 0.0, 0.02);
   } else {
-    // Smooth iteration count
-    float smooth = iter + 1.0 - log(log(length(z2))) / log(2.0);
-    float t = smooth / 60.0;
+    // Smooth iteration
+    float smooth = iter + 1.0 - log(log(length(z))) / log(2.0);
+    float t = smooth / 30.0;
     
-    // Beautiful color cycling
-    vec3 col1 = palette(t + rotation.x * 0.1);
-    vec3 col2 = palette2(t * 0.7 + 0.3);
+    // Beautiful colors
+    col = palette(t + rotation.y * 0.05);
     
-    // Blend based on which fractal
-    col = mix(col1, col2, float(fractalType) * 0.3);
-    
-    // Add glow based on iteration (outer edges glow more)
+    // Glow effect
     float glow = 1.0 - smooth / maxIter;
-    glow = pow(glow, 0.5);
-    col *= (0.5 + glow * 0.8);
+    glow = pow(glow, 0.6);
+    col *= (0.4 + glow * 0.9);
     
-    // Inner glow
-    col += vec3(0.02, 0.04, 0.08) * (1.0 - glow);
+    // Add inner glow
+    col += vec3(0.01, 0.02, 0.05) * (1.0 - glow);
   }
   
-  // Subtle 3D shading based on rotation
-  float shade = 0.8 + 0.2 * sin(rotation.x + rotation.y);
-  col *= shade;
+  // 3D rotation shading
+  col *= 0.85 + 0.15 * sin(rotation.x * 0.5 + rotation.y * 0.3);
   
   // Vignette
-  float vign = 1.0 - length(vUv - 0.5) * 0.5;
+  float vign = 1.0 - length(vUv - 0.5) * 0.6;
   col *= vign;
   
-  // Gamma correction
-  col = pow(col, vec3(0.9));
+  // Gamma
+  col = pow(col, vec3(0.95));
   
   gl_FragColor = vec4(col, 1.0);
 }
@@ -178,11 +161,6 @@ export default function App() {
     gl.attachShader(program, vert);
     gl.attachShader(program, frag);
     gl.linkProgram(program);
-    
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      console.error('Program link error:', gl.getProgramInfoLog(program));
-    }
-    
     gl.useProgram(program);
     programRef.current = program;
     
@@ -210,7 +188,7 @@ export default function App() {
       const time = (Date.now() - startTime.current) / 1000;
       const rot = state.rotation;
       const currentRot = autoRotate 
-        ? [rot[0] + time * 0.3, rot[1] + time * 0.2, rot[2] + time * 0.1] 
+        ? [rot[0] + time * 0.2, rot[1] + time * 0.15, rot[2] + time * 0.1] 
         : rot;
       
       gl.uniform2f(gl.getUniformLocation(programRef.current, 'resolution'), gl.drawingBufferWidth, gl.drawingBufferHeight);
@@ -230,8 +208,8 @@ export default function App() {
     render();
   };
   
-  const handleZoomIn = () => setZoom(z => Math.min(z * 1.8, 1e10));
-  const handleZoomOut = () => setZoom(z => Math.max(z / 1.8, 0.5));
+  const handleZoomIn = () => setZoom(z => Math.min(z * 2, 1e10));
+  const handleZoomOut = () => setZoom(z => Math.max(z / 2, 0.5));
   
   const nextFractal = () => {
     setFractalType(t => (t + 1) % 3);
@@ -253,23 +231,12 @@ export default function App() {
     setRotation(r => { const nr = [...r]; nr[axis] = nr[axis] + delta; return nr; });
   };
   
-  const handlePan = (dx, dy) => {
-    const speed = 0.05 / zoom;
-    setCenterX(x => Math.max(-3, Math.min(3, x + dx * speed)));
-    setCenterY(y => Math.max(-3, Math.min(3, y - dy * speed)));
-  };
-  
   const [gestureStart, setGestureStart] = useState(null);
-  const lastPinch = useRef(1);
   
   const handleTouchStart = (e) => {
     const touches = e.nativeEvent.touches;
     if (touches.length === 1) {
       setGestureStart({ x: touches[0].pageX, y: touches[0].pageY });
-    } else if (touches.length === 2) {
-      const dx = touches[0].pageX - touches[1].pageX;
-      const dy = touches[0].pageY - touches[1].pageY;
-      lastPinch.current = Math.sqrt(dx*dx + dy*dy);
     }
   };
   
@@ -279,25 +246,19 @@ export default function App() {
     if (touches.length === 1 && gestureStart) {
       const dx = touches[0].pageX - gestureStart.x;
       const dy = touches[0].pageY - gestureStart.y;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
-        handlePan(dx * 0.02, dy * 0.02);
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+        // Pan
+        const panSpeed = 0.03 / zoom;
+        setCenterX(x => Math.max(-3, Math.min(3, x + dx * panSpeed)));
+        setCenterY(y => Math.max(-3, Math.min(3, y - dy * panSpeed)));
         setGestureStart({ x: touches[0].pageX, y: touches[0].pageY });
       }
     } else if (touches.length === 2) {
-      const dx = touches[0].pageX - touches[1].pageX;
-      const dy = touches[0].pageY - touches[1].pageY;
-      const dist = Math.sqrt(dx*dx + dy*dy);
-      const scale = dist / lastPinch.current;
-      
-      if (scale > 1.1) { setZoom(z => Math.min(z * 1.05, 1e10)); lastPinch.current = dist; }
-      else if (scale < 0.9) { setZoom(z => Math.max(z / 1.05, 0.5)); lastPinch.current = dist; }
+      // Pinch zoom handled elsewhere
     }
   };
   
-  const handleTouchEnd = () => {
-    setGestureStart(null);
-    lastPinch.current = 1;
-  };
+  const handleTouchEnd = () => setGestureStart(null);
   
   const FRACTAL_NAMES = ['Mandelbrot', 'Julia', 'Burning Ship'];
   
@@ -313,20 +274,20 @@ export default function App() {
       <TouchableOpacity style={styles.header} onPress={() => setShowControls(!showControls)}>
         <Text style={styles.title}>🌀 FractalGo</Text>
         <Text style={styles.subtitle}>
-          {FRACTAL_NAMES[fractalType]} • {zoom.toExponential(1)}x
-          {autoRotate && ' • 🌀'}
+          {FRACTAL_NAMES[fractalType]} • {zoom < 10 ? zoom.toFixed(2) + 'x' : zoom.toExponential(1)}
+          {autoRotate && ' • Auto'}
         </Text>
       </TouchableOpacity>
       
       {showControls && (
         <View style={styles.controlsPanel}>
-          <Text style={styles.controlTitle}>🌀 Controls</Text>
+          <Text style={styles.controlTitle}>Controls</Text>
           
           <TouchableOpacity style={styles.button} onPress={nextFractal}>
-            <Text style={styles.buttonText}>🔄 {FRACTAL_NAMES[fractalType]}</Text>
+            <Text style={styles.buttonText}>{FRACTAL_NAMES[fractalType]} →</Text>
           </TouchableOpacity>
           
-          <Text style={styles.label}>Zoom: {zoom.toExponential(1)}x</Text>
+          <Text style={styles.label}>Zoom: {zoom < 10 ? zoom.toFixed(2) + 'x' : zoom.toExponential(1)}</Text>
           <View style={styles.sliderRow}>
             <TouchableOpacity style={styles.smallButton} onPress={handleZoomOut}>
               <Text style={styles.smallButtonText}>−</Text>
@@ -336,22 +297,25 @@ export default function App() {
             </TouchableOpacity>
           </View>
           
-          <TouchableOpacity style={[styles.button, autoRotate && styles.activeButton]} onPress={() => setAutoRotate(!autoRotate)}>
-            <Text style={styles.buttonText}>🌀 Auto-Rotate: {autoRotate ? 'ON' : 'OFF'}</Text>
+          <TouchableOpacity 
+            style={[styles.button, autoRotate && styles.activeButton]} 
+            onPress={() => setAutoRotate(!autoRotate)}
+          >
+            <Text style={styles.buttonText}>Auto-Rotate: {autoRotate ? 'ON' : 'OFF'}</Text>
           </TouchableOpacity>
           
-          <Text style={styles.label}>3D Rotation</Text>
+          <Text style={styles.label}>3D Rotate</Text>
           <View style={styles.sliderRow}>
-            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(0, -0.3)}>
+            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(0, -0.2)}>
               <Text style={styles.smallButtonText}>X−</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(0, 0.3)}>
+            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(0, 0.2)}>
               <Text style={styles.smallButtonText}>X+</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(1, -0.3)}>
+            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(1, -0.2)}>
               <Text style={styles.smallButtonText}>Y−</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(1, 0.3)}>
+            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(1, 0.2)}>
               <Text style={styles.smallButtonText}>Y+</Text>
             </TouchableOpacity>
           </View>
@@ -374,7 +338,7 @@ export default function App() {
           )}
           
           <TouchableOpacity style={styles.resetButton} onPress={handleReset}>
-            <Text style={styles.buttonText}>🔁 Reset</Text>
+            <Text style={styles.buttonText}>Reset</Text>
           </TouchableOpacity>
           
           <TouchableOpacity style={styles.closeButton} onPress={() => setShowControls(false)}>
@@ -390,7 +354,10 @@ export default function App() {
         <TouchableOpacity style={styles.actionButton} onPress={handleZoomIn}>
           <Text style={styles.actionText}>+</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.actionButton, autoRotate && styles.activeAction]} onPress={() => setAutoRotate(!autoRotate)}>
+        <TouchableOpacity 
+          style={[styles.actionButton, autoRotate && styles.activeAction]} 
+          onPress={() => setAutoRotate(!autoRotate)}
+        >
           <Text style={styles.actionText}>🌀</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButton} onPress={handleZoomOut}>
@@ -410,32 +377,32 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   glView: { flex: 1 },
   header: {
-    position: 'absolute', top: 50, left: 20, zIndex: 10,
+    position: 'absolute', top: 50, left: 15, zIndex: 10,
     backgroundColor: 'rgba(0,0,0,0.7)', padding: 12, borderRadius: 12,
   },
-  title: { fontSize: 24, fontWeight: 'bold', color: '#fff' },
+  title: { fontSize: 22, fontWeight: 'bold', color: '#fff' },
   subtitle: { fontSize: 12, color: '#aaa', marginTop: 2 },
   controlsPanel: {
-    position: 'absolute', top: 120, left: 20, right: 20, bottom: 120,
-    backgroundColor: 'rgba(15,15,25,0.95)', borderRadius: 20, padding: 20,
+    position: 'absolute', top: 110, left: 15, right: 15, bottom: 110,
+    backgroundColor: 'rgba(15,15,25,0.95)', borderRadius: 16, padding: 16,
     borderWidth: 1, borderColor: '#334', zIndex: 20,
   },
-  controlTitle: { fontSize: 18, fontWeight: 'bold', color: '#fff', marginBottom: 15, textAlign: 'center' },
-  label: { color: '#889', fontSize: 12, marginTop: 10, marginBottom: 4 },
-  sliderRow: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 8 },
-  button: { backgroundColor: '#334', padding: 12, borderRadius: 8, alignItems: 'center', marginBottom: 8 },
+  controlTitle: { fontSize: 16, fontWeight: 'bold', color: '#fff', marginBottom: 12, textAlign: 'center' },
+  label: { color: '#889', fontSize: 11, marginTop: 8, marginBottom: 3 },
+  sliderRow: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 6 },
+  button: { backgroundColor: '#334', padding: 10, borderRadius: 8, alignItems: 'center', marginBottom: 8 },
   activeButton: { backgroundColor: '#4a9' },
-  smallButton: { backgroundColor: '#223', padding: 10, borderRadius: 6, minWidth: 55, alignItems: 'center', borderWidth: 1, borderColor: '#445' },
-  smallButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
-  resetButton: { backgroundColor: '#4a9', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 12 },
-  closeButton: { backgroundColor: '#c44', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 8 },
-  buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+  smallButton: { backgroundColor: '#223', padding: 8, borderRadius: 6, minWidth: 50, alignItems: 'center', borderWidth: 1, borderColor: '#445' },
+  smallButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
+  resetButton: { backgroundColor: '#4a9', padding: 10, borderRadius: 8, alignItems: 'center', marginTop: 10 },
+  closeButton: { backgroundColor: '#844', padding: 10, borderRadius: 8, alignItems: 'center', marginTop: 6 },
+  buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
   bottomBar: {
-    position: 'absolute', bottom: 30, left: 0, right: 0,
+    position: 'absolute', bottom: 25, left: 0, right: 0,
     flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 15,
   },
   actionButton: {
-    backgroundColor: 'rgba(40,40,60,0.85)', width: 52, height: 52, borderRadius: 26,
+    backgroundColor: 'rgba(40,40,60,0.85)', width: 50, height: 50, borderRadius: 25,
     justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#556',
   },
   activeAction: { backgroundColor: '#4a9', borderColor: '#6cb' },
