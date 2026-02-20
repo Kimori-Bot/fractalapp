@@ -1,0 +1,41 @@
+{
+  "name": "gl-react-native",
+  "version": "5.2.1",
+  "license": "MIT",
+  "author": "Gaëtan Renaudeau <renaudeau.gaetan@gmail.com>",
+  "description": "React Native standalone implementation of gl-react, an universal React library to write and compose WebGL shaders",
+  "keywords": [
+    "gl-react",
+    "gl",
+    "opengl",
+    "react",
+    "react-native",
+    "react-component"
+  ],
+  "main": "lib/index.js",
+  "files": [
+    "android",
+    "cpp",
+    "ios",
+    "lib",
+    "src",
+    ".flowconfig",
+    "LICENSE",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "gl-react": "*",
+    "react": "*",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "gl-react": "^5.2.0"
+  },
+  "dependencies": {
+    "expo-gl": "^11.3.0",
+    "expo-gl-cpp": "^11.3.0",
+    "gl-react-expo": "^5.2.1",
+    "webgltexture-loader-expo": "1.2.0"
+  },
+  "gitHead": "90a940227552d3d2cc839864f623050af8dd2c6b"
+}

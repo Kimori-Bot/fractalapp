@@ -1,437 +1,442 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Dimensions, ScrollView, Alert } from 'react-native';
-import { Canvas, Skia, Paint, useCanvas, Image } from '@shopify/react-native-skia';
+import React, { useState, useEffect, useRef } from 'react';
+import { StyleSheet, View, Text, TouchableOpacity, Dimensions } from 'react-native';
+import { GLView } from 'expo-gl';
+import { StatusBar } from 'expo-status-bar';
 
 const { width, height } = Dimensions.get('window');
 
-// Color palettes for fractals
-const PALETTES = {
-  psychedelic: ['#FF00FF', '#00FFFF', '#FFFF00', '#FF0000', '#00FF00'],
-  ocean: ['#000033', '#000066', '#000099', '#0000CC', '#0066FF', '#00CCFF'],
-  fire: ['#000000', '#330000', '#660000', '#990000', '#CC0000', '#FF0000', '#FFFF00'],
-  neon: ['#FF00FF', '#00FFFF', '#FF0080', '#80FF00', '#00FF80'],
-  sunset: ['#1a0a2e', '#3d1a5c', '#6b2d7b', '#a33d8f', '#d44d9b', '#f57c8a'],
-  rainbow: ['#FF0000', '#FF7F00', '#FFFF00', '#00FF00', '#0000FF', '#4B0082', '#9400D3'],
-};
+const VERTEX_SHADER = `
+attribute vec2 position;
+varying vec2 vUv;
+void main() {
+  vUv = position * 0.5 + 0.5;
+  gl_Position = vec4(position, 0.0, 1.0);
+}
+`;
 
-const FRACTAL_TYPES = ['Mandelbrot', 'Julia', 'Burning Ship'];
+const FRAGMENT_SHADER = `
+precision highp float;
+varying vec2 vUv;
+uniform vec2 resolution;
+uniform float time;
+uniform float zoom;
+uniform vec2 center;
+uniform int fractalType;
+uniform vec2 juliaC;
+uniform vec3 rotation;
+uniform float beat;
+uniform float bass;
 
-// Generate pixel data for fractal
-function generateFractalData(type, w, h, maxIter, zoom, offsetX, offsetY, juliaC) {
-  const pixels = new Uint8Array(w * h * 4);
+mat3 rotateX(float a) {
+  float c = cos(a), s = sin(a);
+  return mat3(1.0, 0.0, 0.0, 0.0, c, -s, 0.0, s, c);
+}
+
+mat3 rotateY(float a) {
+  float c = cos(a), s = sin(a);
+  return mat3(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
+}
+
+mat3 rotateZ(float a) {
+  float c = cos(a), s = sin(a);
+  return mat3(c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0);
+}
+
+vec3 hsv2rgb(vec3 c) {
+  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+// Drum & Bass beat fast 170 BPM
+float dnbBeat(float t) {
+  float bpm = 170.0;
+  float beatTime = 60.0 / bpm;
+  float phase = mod(t, beatTime) / beatTime;
+  // Sharp attack, quick decay
+  return pow(1.0 - phase, 8.0) * step(0.02, phase);
+}
+
+float dnbBass(float t) {
+  // Sub bass pulse every beat
+  float bpm = 170.0;
+  float beatTime = 60.0 / bpm;
+  float phase = mod(t, beatTime * 2.0) / (beatTime * 2.0);
+  return pow(1.0 - phase, 4.0);
+}
+
+void main() {
+  // Audio reactivity
+  float beatPulse = dnbBeat(time);
+  float bassPulse = dnbBass(time);
   
-  for (let py = 0; py < h; py++) {
-    for (let px = 0; px < w; px++) {
-      const x0 = (px - w / 2) / (w / 4 * zoom) + offsetX;
-      const y0 = (py - h / 2) / (h / 4 * zoom) + offsetY;
-      
-      let x = 0, y = 0;
-      let iteration = 0;
-      
-      if (type === 'Mandelbrot') {
-        while (x * x + y * y <= 4 && iteration < maxIter) {
-          const xTemp = x * x - y * y + x0;
-          y = 2 * x * y + y0;
-          x = xTemp;
-          iteration++;
-        }
-      } else if (type === 'Julia') {
-        x = x0;
-        y = y0;
-        while (x * x + y * y <= 4 && iteration < maxIter) {
-          const xTemp = x * x - y * y + juliaC.real;
-          y = 2 * x * y + juliaC.imag;
-          x = xTemp;
-          iteration++;
-        }
-      } else if (type === 'Burning Ship') {
-        while (x * x + y * y <= 4 && iteration < maxIter) {
-          const xTemp = x * x - y * y + x0;
-          y = Math.abs(2 * x * y) + y0;
-          x = xTemp;
-          iteration++;
-        }
-      }
-      
-      const index = (py * w + px) * 4;
-      
-      if (iteration === maxIter) {
-        pixels[index] = 0;
-        pixels[index + 1] = 0;
-        pixels[index + 2] = 0;
-      } else {
-        // Color based on iteration using palette
-        const hue = (iteration / maxIter) * 360;
-        const [r, g, b] = hslToRgb(hue, 1, 0.5);
-        pixels[index] = r;
-        pixels[index + 1] = g;
-        pixels[index + 2] = b;
-      }
-      pixels[index + 3] = 255;
+  // Beat affects zoom and rotation
+  float beatZoom = zoom * (1.0 + beatPulse * 0.15);
+  float beatRot = time * (0.5 + beatPulse * 2.0);
+  
+  vec2 uv = (vUv - 0.5) * 3.0;
+  uv.x *= resolution.x / resolution.y;
+  
+  // Bass shakes the perspective
+  uv += vec2(sin(time * 50.0), cos(time * 47.0)) * bassPulse * 0.02;
+  
+  vec3 p = vec3(uv, 1.0 / (beatZoom * 0.5 + 0.5));
+  
+  // Beat-reactive rotation
+  p = rotateX(rotation.x + beatRot * 0.5) * rotateY(rotation.y + beatRot * 0.8) * rotateZ(rotation.z) * p;
+  
+  p.xy /= max(p.z, 0.1);
+  
+  vec2 c = p.xy * 0.3 + center;
+  vec2 z = vec2(0.0);
+  vec2 m = c;
+  
+  if (fractalType == 1) {
+    z = c;
+    m = juliaC;
+  }
+  
+  float maxIter = 100.0 + log(beatZoom + 1.0) * 30.0;
+  maxIter = min(maxIter, 400.0);
+  float iter = 0.0;
+  
+  for (float i = 0.0; i < 400.0; i++) {
+    if (i >= maxIter) break;
+    
+    if (fractalType == 2) {
+      z = vec2(z.x*z.x - z.y*z.y, abs(2.0*z.x*z.y)) + m;
+    } else {
+      z = vec2(z.x*z.x - z.y*z.y, 2.0*z.x*z.y) + m;
     }
+    
+    if (dot(z, z) > 4.0) {
+      iter = i;
+      break;
+    }
+    iter = i;
   }
   
-  return pixels;
-}
-
-function hslToRgb(h, s, l) {
-  let r, g, b;
-  if (s === 0) {
-    r = g = b = l;
+  if (iter >= maxIter - 1.0) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
   } else {
-    const hue2rgb = (p, q, t) => {
-      if (t < 0) t += 1;
-      if (t > 1) t -= 1;
-      if (t < 1/6) return p + (q - p) * 6 * t;
-      if (t < 1/2) return q;
-      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-      return p;
-    };
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    r = hue2rgb(p, q, h / 360 + 1/3);
-    g = hue2rgb(p, q, h / 360);
-    b = hue2rgb(p, q, h / 360 - 1/3);
+    float smooth = iter + 1.0 - log(log(length(z))) / log(2.0);
+    
+    // Rave colors - neon cyan, magenta, yellow
+    float hue = mod(smooth * 0.04 + time * 0.3 + rotation.x + beatPulse * 0.3, 1.0);
+    
+    // Bass hits shift the hue dramatically
+    hue += bassPulse * 0.15;
+    
+    float sat = 0.85 + beatPulse * 0.15;
+    float val = 1.0 - pow(smooth / maxIter, 0.4);
+    
+    // Beat flash
+    val = val * (0.7 + beatPulse * 0.5);
+    
+    // Neon glow
+    vec3 color = hsv2rgb(vec3(hue, sat, val));
+    
+    // Add rave glow
+    color += vec3(beatPulse * 0.3, bassPulse * 0.2, beatPulse * 0.4);
+    
+    // 3D lighting
+    float lighting = 0.5 + 0.5 * sin(p.z * 3.14159 + rotation.x + beatRot);
+    color *= (0.6 + 0.4 * lighting);
+    
+    // Flash on beat
+    color += vec3(bassPulse * 0.15, bassPulse * 0.1, bassPulse * 0.2);
+    
+    gl_FragColor = vec4(color, 1.0);
   }
-  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
 }
-
-function FractalCanvas({ type, maxIter, zoom, offsetX, offsetY, palette, juliaC }) {
-  const canvasWidth = Math.floor(width);
-  const canvasHeight = Math.floor(height - 150);
-  
-  // Generate fractal data (at lower resolution for performance)
-  const scale = 4;
-  const w = Math.floor(canvasWidth / scale);
-  const h = Math.floor(canvasHeight / scale);
-  
-  const pixelData = generateFractalData(type, w, h, maxIter, zoom, offsetX, offsetY, juliaC);
-  
-  // Create Skia image from pixel data
-  const image = Skia.Image.MakeImage(
-    { width: w, height: h, colorType: 'RGBA_8888' },
-    pixelData,
-    w * 4
-  );
-  
-  return (
-    <View style={styles.canvasContainer}>
-      <Canvas style={{ width: canvasWidth, height: canvasHeight }}>
-        <Image
-          image={image}
-          rect={{ x: 0, y: 0, width: canvasWidth, height: canvasHeight }}
-        />
-      </Canvas>
-    </View>
-  );
-}
+`;
 
 export default function App() {
-  const [fractalType, setFractalType] = useState('Mandelbrot');
-  const [maxIter, setMaxIter] = useState(80);
-  const [zoom, setZoom] = useState(1);
-  const [offsetX, setOffsetX] = useState(0);
-  const [offsetY, setOffsetY] = useState(0);
-  const [paletteName, setPaletteName] = useState('rainbow');
-  const [showControls, setShowControls] = useState(false);
+  const [fractalType, setFractalType] = useState(0);
+  const [zoom, setZoom] = useState(1.0);
+  const [centerX, setCenterX] = useState(-0.5);
+  const [centerY, setCenterY] = useState(0);
   const [juliaC, setJuliaC] = useState({ real: -0.7, imag: 0.27015 });
-  const [renderCount, setRenderCount] = useState(0);
+  const [showControls, setShowControls] = useState(false);
+  const [autoZoom, setAutoZoom] = useState(false);
+  const [autoRotate, setAutoRotate] = useState(true);
+  const [raveMode, setRaveMode] = useState(true); // Rave mode ON by default
+  const [rotation, setRotation] = useState([0, 0, 0]);
   
-  // Force re-render
-  const [, setTick] = useState(0);
+  // Refs for WebGL to access current state
+  const stateRef = useRef({ fractalType: 0, zoom: 1, centerX: -0.5, centerY: 0, juliaC: { real: -0.7, imag: 0.27015 }, rotation: [0, 0, 0] });
+  const glRef = useRef(null);
+  const programRef = useRef(null);
+  const startTime = useRef(Date.now());
   
+  // Keep refs in sync with state
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setTick(t => t + 1);
-    }, 50);
-    return () => clearTimeout(timer);
-  }, [fractalType, maxIter, zoom, offsetX, offsetY, paletteName, juliaC]);
+    stateRef.current = { fractalType, zoom, centerX, centerY, juliaC, rotation };
+  }, [fractalType, zoom, centerX, centerY, juliaC, rotation]);
   
-  const nextFractal = useCallback(() => {
-    const idx = FRACTAL_TYPES.indexOf(fractalType);
-    const next = FRACTAL_TYPES[(idx + 1) % FRACTAL_TYPES.length];
-    setFractalType(next);
+  const onContextCreate = (gl) => {
+    glRef.current = gl;
+    
+    const vert = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vert, VERTEX_SHADER);
+    gl.compileShader(vert);
+    
+    const frag = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(frag, FRAGMENT_SHADER);
+    gl.compileShader(frag);
+    
+    const program = gl.createProgram();
+    gl.attachShader(program, vert);
+    gl.attachShader(program, frag);
+    gl.linkProgram(program);
+    gl.useProgram(program);
+    programRef.current = program;
+    
+    const vertices = new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]);
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    
+    const posLoc = gl.getAttribLocation(program, 'position');
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    
+    const render = () => {
+      if (!glRef.current || !programRef.current) return;
+      
+      const gl = glRef.current;
+      const state = stateRef.current;
+      
+      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      
+      gl.useProgram(programRef.current);
+      
+      const time = (Date.now() - startTime.current) / 1000;
+      const rot = state.rotation;
+      // Rave mode = crazy fast rotation
+      const speed = raveMode ? 3.0 : 0.5;
+      const currentRot = autoRotate ? [rot[0] + time * speed, rot[1] + time * speed * 1.5, rot[2] + time * speed * 0.5] : rot;
+      
+      gl.uniform2f(gl.getUniformLocation(programRef.current, 'resolution'), gl.drawingBufferWidth, gl.drawingBufferHeight);
+      gl.uniform1f(gl.getUniformLocation(programRef.current, 'time'), time);
+      gl.uniform1f(gl.getUniformLocation(programRef.current, 'zoom'), state.zoom);
+      gl.uniform2f(gl.getUniformLocation(programRef.current, 'center'), state.centerX, state.centerY);
+      gl.uniform1i(gl.getUniformLocation(programRef.current, 'fractalType'), state.fractalType);
+      gl.uniform2f(gl.getUniformLocation(programRef.current, 'juliaC'), state.juliaC.real, state.juliaC.imag);
+      gl.uniform3fv(gl.getUniformLocation(programRef.current, 'rotation'), currentRot);
+      
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.endFrameEXP();
+      
+      requestAnimationFrame(render);
+    };
+    
+    render();
+  };
+  
+  // Animation loop for auto-zoom
+  useEffect(() => {
+    let animId;
+    if (autoZoom) {
+      const animate = () => {
+        setZoom(z => Math.min(z * 1.015, 1e10));
+        animId = requestAnimationFrame(animate);
+      };
+      animId = requestAnimationFrame(animate);
+    }
+    return () => cancelAnimationFrame(animId);
+  }, [autoZoom]);
+  
+  const handleZoomIn = () => { setAutoZoom(false); setZoom(z => Math.min(z * 1.5, 1e10)); };
+  const handleZoomOut = () => { setAutoZoom(false); setZoom(z => Math.max(z / 1.5, 0.3)); };
+  
+  const nextFractal = () => {
+    setFractalType(t => (t + 1) % 3);
     setZoom(1);
-    setOffsetX(0);
-    setOffsetY(0);
-  }, [fractalType]);
-  
-  const nextPalette = useCallback(() => {
-    const keys = Object.keys(PALETTES);
-    const idx = keys.indexOf(paletteName);
-    setPaletteName(keys[(idx + 1) % keys.length]);
-  }, [paletteName]);
-  
-  const handleZoomIn = () => setZoom(z => Math.min(z * 1.5, 100));
-  const handleZoomOut = () => setZoom(z => Math.max(z / 1.5, 0.1));
+    setCenterX(-0.5);
+    setCenterY(0);
+    setRotation([0, 0, 0]);
+  };
   
   const handleReset = () => {
+    setAutoZoom(false);
     setZoom(1);
-    setOffsetX(0);
-    setOffsetY(0);
+    setCenterX(-0.5);
+    setCenterY(0);
+    setRotation([0, 0, 0]);
+  };
+  
+  const adjustRotation = (axis, delta) => {
+    setAutoRotate(false);
+    setRotation(r => {
+      const nr = [...r];
+      nr[axis] = nr[axis] + delta;
+      return nr;
+    });
   };
   
   const handlePan = (dx, dy) => {
-    const panSpeed = 0.3 / zoom;
-    setOffsetX(x => x - dx * panSpeed);
-    setOffsetY(y => y - dy * panSpeed);
+    const speed = 0.08 / zoom;
+    setCenterX(x => Math.max(-3, Math.min(3, x - dx * speed)));
+    setCenterY(y => Math.max(-3, Math.min(3, y - dy * speed)));
   };
   
+  const [gestureStart, setGestureStart] = useState(null);
+  
+  const handleTouchMove = (e) => {
+    if (!gestureStart) return;
+    const dx = e.nativeEvent.pageX - gestureStart.x;
+    const dy = e.nativeEvent.pageY - gestureStart.y;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+      handlePan(dx * 0.015, dy * 0.015);
+      setGestureStart({ x: e.nativeEvent.pageX, y: e.nativeEvent.pageY });
+    }
+  };
+  
+  const FRACTAL_NAMES = ['Mandelbrot', 'Julia', 'Burning Ship'];
+  
   return (
-    <View style={styles.container}>
-      {/* Fractal Canvas */}
-      <View style={styles.canvasWrapper}>
-        <FractalCanvas
-          type={fractalType}
-          maxIter={maxIter}
-          zoom={zoom}
-          offsetX={offsetX}
-          offsetY={offsetY}
-          palette={PALETTES[paletteName]}
-          juliaC={juliaC}
-        />
-      </View>
+    <View 
+      style={styles.container}
+      onTouchStart={(e) => setGestureStart({ x: e.nativeEvent.pageX, y: e.nativeEvent.pageY })}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={() => setGestureStart(null)}
+    >
+      <GLView style={styles.glView} onContextCreate={onContextCreate} />
       
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.title}>✨ FractalGo</Text>
-        <TouchableOpacity onPress={() => setShowControls(!showControls)}>
-          <Text style={styles.settingsIcon}>⚙️</Text>
-        </TouchableOpacity>
-      </View>
+      <TouchableOpacity style={styles.header} onPress={() => setShowControls(!showControls)}>
+        <Text style={styles.title}>✨ FractalGo 3D</Text>
+        <Text style={styles.subtitle}>
+          {FRACTAL_NAMES[fractalType]} • {zoom.toExponential(1)}x
+          {autoRotate && ' • 🌀'}
+        </Text>
+      </TouchableOpacity>
       
-      {/* Controls Panel */}
       {showControls && (
         <View style={styles.controlsPanel}>
-          <ScrollView>
-            <Text style={styles.controlTitle}>✨ Controls</Text>
-            
-            <Text style={styles.label}>Type: {fractalType}</Text>
-            <TouchableOpacity style={styles.button} onPress={nextFractal}>
-              <Text style={styles.buttonText}>🔄 Switch Fractal</Text>
+          <Text style={styles.controlTitle}>✨ 3D Controls</Text>
+          
+          <TouchableOpacity style={styles.button} onPress={nextFractal}>
+            <Text style={styles.buttonText}>🔄 {FRACTAL_NAMES[fractalType]}</Text>
+          </TouchableOpacity>
+          
+          <Text style={styles.label}>Zoom: {zoom.toExponential(1)}x</Text>
+          <View style={styles.sliderRow}>
+            <TouchableOpacity style={styles.smallButton} onPress={handleZoomOut}>
+              <Text style={styles.smallButtonText}>-</Text>
             </TouchableOpacity>
-            
-            <Text style={styles.label}>Iterations: {maxIter}</Text>
+            <TouchableOpacity style={[styles.smallButton, autoZoom && styles.activeButton]} onPress={() => setAutoZoom(!autoZoom)}>
+              <Text style={styles.smallButtonText}>{autoZoom ? '🚀 ON' : '🚀'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.smallButton} onPress={handleZoomIn}>
+              <Text style={styles.smallButtonText}>+</Text>
+            </TouchableOpacity>
+          </View>
+          
+          <TouchableOpacity style={[styles.button, autoRotate && styles.activeButton]} onPress={() => setAutoRotate(!autoRotate)}>
+            <Text style={styles.buttonText}>🌀 Auto-Rotate: {autoRotate ? 'ON' : 'OFF'}</Text>
+          </TouchableOpacity>
+          
+          <Text style={styles.label}>Manual 3D Rotate</Text>
+          <View style={styles.sliderRow}>
+            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(0, -0.2)}>
+              <Text style={styles.smallButtonText}>X-</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(0, 0.2)}>
+              <Text style={styles.smallButtonText}>X+</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(1, -0.2)}>
+              <Text style={styles.smallButtonText}>Y-</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.smallButton} onPress={() => adjustRotation(1, 0.2)}>
+              <Text style={styles.smallButtonText}>Y+</Text>
+            </TouchableOpacity>
+          </View>
+          
+          {fractalType === 1 && (
             <View style={styles.sliderRow}>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setMaxIter(m => Math.max(20, m - 20))}>
-                <Text style={styles.smallButtonText}>-</Text>
+              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, real: c.real - 0.05 }))}>
+                <Text style={styles.smallButtonText}>Re-</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setMaxIter(m => Math.min(200, m + 20))}>
-                <Text style={styles.smallButtonText}>+</Text>
+              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, real: c.real + 0.05 }))}>
+                <Text style={styles.smallButtonText}>Re+</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, imag: c.imag - 0.05 }))}>
+                <Text style={styles.smallButtonText}>Im-</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, imag: c.imag + 0.05 }))}>
+                <Text style={styles.smallButtonText}>Im+</Text>
               </TouchableOpacity>
             </View>
-            
-            <Text style={styles.label}>Zoom: {zoom.toFixed(2)}x</Text>
-            <View style={styles.sliderRow}>
-              <TouchableOpacity style={styles.smallButton} onPress={handleZoomOut}>
-                <Text style={styles.smallButtonText}>🔍-</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.smallButton} onPress={handleZoomIn}>
-                <Text style={styles.smallButtonText}>🔍+</Text>
-              </TouchableOpacity>
-            </View>
-            
-            <Text style={styles.label}>Pan Position</Text>
-            <View style={styles.sliderRow}>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setOffsetX(x => x - 0.2 / zoom)}>
-                <Text style={styles.smallButtonText}>⬅️</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setOffsetX(x => x + 0.2 / zoom)}>
-                <Text style={styles.smallButtonText}>➡️</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setOffsetY(y => y - 0.2 / zoom)}>
-                <Text style={styles.smallButtonText}>⬆️</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setOffsetY(y => y + 0.2 / zoom)}>
-                <Text style={styles.smallButtonText}>⬇️</Text>
-              </TouchableOpacity>
-            </View>
-            
-            <Text style={styles.label}>Colors: {paletteName}</Text>
-            <TouchableOpacity style={styles.button} onPress={nextPalette}>
-              <Text style={styles.buttonText}>🎨 Change Palette</Text>
-            </TouchableOpacity>
-            
-            {fractalType === 'Julia' && (
-              <>
-                <Text style={styles.label}>Julia C: {juliaC.real.toFixed(2)} + {juliaC.imag.toFixed(2)}i</Text>
-                <View style={styles.sliderRow}>
-                  <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, real: c.real - 0.05 }))}>
-                    <Text style={styles.smallButtonText}>Re-</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, real: c.real + 0.05 }))}>
-                    <Text style={styles.smallButtonText}>Re+</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, imag: c.imag - 0.05 }))}>
-                    <Text style={styles.smallButtonText}>Im-</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, imag: c.imag + 0.05 }))}>
-                    <Text style={styles.smallButtonText}>Im+</Text>
-                  </TouchableOpacity>
-                </View>
-              </>
-            )}
-            
-            <TouchableOpacity style={styles.resetButton} onPress={handleReset}>
-              <Text style={styles.buttonText}>🔁 Reset View</Text>
-            </TouchableOpacity>
-            
-            <TouchableOpacity style={styles.closeButton} onPress={() => setShowControls(false)}>
-              <Text style={styles.buttonText}>✕ Close</Text>
-            </TouchableOpacity>
-          </ScrollView>
+          )}
+          
+          <TouchableOpacity style={styles.resetButton} onPress={handleReset}>
+            <Text style={styles.buttonText}>🔁 Reset</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity style={styles.closeButton} onPress={() => setShowControls(false)}>
+            <Text style={styles.buttonText}>✕</Text>
+          </TouchableOpacity>
         </View>
       )}
       
-      {/* Bottom Bar */}
       <View style={styles.bottomBar}>
         <TouchableOpacity style={styles.actionButton} onPress={nextFractal}>
           <Text style={styles.actionText}>🔄</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.actionButton} onPress={nextPalette}>
-          <Text style={styles.actionText}>🎨</Text>
-        </TouchableOpacity>
         <TouchableOpacity style={styles.actionButton} onPress={handleZoomIn}>
-          <Text style={styles.actionText}>➕</Text>
+          <Text style={styles.actionText}>+</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.actionButton, raveMode && styles.activeAction]} onPress={() => setRaveMode(!raveMode)}>
+          <Text style={styles.actionText}>🎵</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButton} onPress={handleZoomOut}>
-          <Text style={styles.actionText}>➖</Text>
+          <Text style={styles.actionText}>-</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButton} onPress={() => setShowControls(true)}>
           <Text style={styles.actionText}>⚙️</Text>
         </TouchableOpacity>
       </View>
+      
+      <StatusBar style="light" />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0D0D0D',
-  },
-  canvasWrapper: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  canvasContainer: {
-    flex: 1,
-  },
+  container: { flex: 1, backgroundColor: '#000' },
+  glView: { flex: 1 },
   header: {
-    position: 'absolute',
-    top: 50,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    zIndex: 10,
+    position: 'absolute', top: 50, left: 20, zIndex: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)', padding: 10, borderRadius: 12,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#fff',
-    textShadowColor: '#6C5CE7',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 15,
-  },
-  settingsIcon: {
-    fontSize: 28,
-  },
+  title: { fontSize: 22, fontWeight: 'bold', color: '#fff' },
+  subtitle: { fontSize: 11, color: '#aaa', marginTop: 2 },
   controlsPanel: {
-    position: 'absolute',
-    top: 100,
-    left: 20,
-    right: 20,
-    bottom: 120,
-    backgroundColor: 'rgba(26, 26, 46, 0.98)',
-    borderRadius: 24,
-    padding: 20,
-    borderWidth: 2,
-    borderColor: '#6C5CE7',
-    zIndex: 20,
+    position: 'absolute', top: 110, left: 20, right: 20, bottom: 110,
+    backgroundColor: 'rgba(20,20,40,0.95)', borderRadius: 20, padding: 18,
+    borderWidth: 2, borderColor: '#6C5CE7', zIndex: 20,
   },
-  controlTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 15,
-    textAlign: 'center',
-  },
-  label: {
-    color: '#aaa',
-    fontSize: 14,
-    marginTop: 12,
-    marginBottom: 6,
-  },
-  sliderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 8,
-  },
-  button: {
-    backgroundColor: '#6C5CE7',
-    padding: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  smallButton: {
-    backgroundColor: '#2D2D4A',
-    padding: 12,
-    borderRadius: 10,
-    minWidth: 65,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#6C5CE7',
-  },
-  smallButtonText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
-  resetButton: {
-    backgroundColor: '#00CEC9',
-    padding: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 15,
-  },
-  closeButton: {
-    backgroundColor: '#FD79A8',
-    padding: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  buttonText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
+  controlTitle: { fontSize: 18, fontWeight: 'bold', color: '#fff', marginBottom: 15, textAlign: 'center' },
+  label: { color: '#aaa', fontSize: 12, marginTop: 8, marginBottom: 3 },
+  sliderRow: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 10 },
+  button: { backgroundColor: '#6C5CE7', padding: 12, borderRadius: 8, alignItems: 'center', marginBottom: 10 },
+  activeButton: { backgroundColor: '#00CEC9' },
+  smallButton: { backgroundColor: '#2D2D4A', padding: 10, borderRadius: 6, minWidth: 55, alignItems: 'center', borderWidth: 1, borderColor: '#6C5CE7' },
+  smallButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
+  resetButton: { backgroundColor: '#00CEC9', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 10 },
+  closeButton: { backgroundColor: '#FD79A8', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 8 },
+  buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
   bottomBar: {
-    position: 'absolute',
-    bottom: 30,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    paddingHorizontal: 10,
-    paddingBottom: 10,
+    position: 'absolute', bottom: 30, left: 0, right: 0,
+    flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 10,
   },
   actionButton: {
-    backgroundColor: 'rgba(108, 92, 231, 0.8)',
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#fff',
+    backgroundColor: 'rgba(108,92,231,0.85)', width: 54, height: 54, borderRadius: 27,
+    justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#fff',
   },
-  actionText: {
-    fontSize: 24,
-  },
+  activeAction: { backgroundColor: '#00CEC9', borderColor: '#00CEC9' },
+  actionText: { fontSize: 20 },
 });
