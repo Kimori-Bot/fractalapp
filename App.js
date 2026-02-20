@@ -18,19 +18,14 @@ varying vec2 vUv;
 uniform vec2 resolution;
 uniform float time;
 uniform float zoom;
-uniform vec2 center;
+uniform vec3 center;
 uniform int fractalType;
-uniform vec2 juliaC;
+uniform vec3 juliaC;
 uniform vec3 rotation;
 
-// Cosine palette - beautiful colors
-vec3 palette(float t) {
-  vec3 a = vec3(0.5, 0.5, 0.5);
-  vec3 b = vec3(0.5, 0.5, 0.5);
-  vec3 c = vec3(1.0, 1.0, 1.0);
-  vec3 d = vec3(0.0, 0.33, 0.67);
-  return a + b * cos(6.28318 * (c * t + d));
-}
+#define MAX_STEPS 100
+#define MAX_DIST 50.0
+#define SURF_DIST 0.002
 
 mat3 rotateX(float a) {
   float c = cos(a), s = sin(a);
@@ -47,81 +42,185 @@ mat3 rotateZ(float a) {
   return mat3(c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0);
 }
 
+vec3 palette(float t) {
+  vec3 a = vec3(0.5, 0.5, 0.5);
+  vec3 b = vec3(0.5, 0.5, 0.5);
+  vec3 c = vec3(1.0, 1.0, 1.0);
+  vec3 d = vec3(0.0, 0.33, 0.67);
+  return a + b * cos(6.28318 * (c * t + d));
+}
+
+// Mandelbulb distance estimator
+float mandelbulbDE(vec3 pos, float power) {
+  vec3 z = pos;
+  float dr = 1.0;
+  float r = 0.0;
+  
+  for (int i = 0; i < 8; i++) {
+    r = length(z);
+    if (r > 2.0) break;
+    
+    float theta = acos(z.z / r);
+    float phi = atan(z.y, z.x);
+    dr = pow(r, power - 1.0) * power * dr + 1.0;
+    
+    float zr = pow(r, power);
+    theta = theta * power;
+    phi = phi * power;
+    
+    z = zr * vec3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
+    z += pos;
+  }
+  return 0.5 * log(r) * r / dr;
+}
+
+// Julia bulb
+float juliaDE(vec3 pos, vec3 c) {
+  vec3 z = pos;
+  float md = 1.0;
+  float mz2 = dot(z, z);
+  
+  for (int i = 0; i < 8; i++) {
+    md *= 4.0 * sqrt(mz2);
+    
+    float x = z.x; float x2 = x*x;
+    float y = z.y; float y2 = y*y;
+    float z2 = z.z*z.z;
+    
+    z.y = 2.0*x*y + c.y;
+    z.z = 2.0*x*z + c.z;
+    z.x = x2 - y2 - z2 + c.x;
+    
+    mz2 = dot(z, z);
+    if (mz2 > 4.0) break;
+  }
+  return 0.25 * sqrt(mz2 / md) * log(mz2);
+}
+
+// Mandelbox
+float mandelboxDE(vec3 pos, float scale) {
+  vec4 s = vec4(scale);
+  float mr = 4.0;
+  float minR2 = 0.25;
+  float fixedR2 = 1.0;
+  
+  vec3 p = pos;
+  float dr = 1.0;
+  
+  for (int i = 0; i < 10; i++) {
+    p = clamp(p, -1.0, 1.0) * 2.0 - p;
+    
+    float r2 = dot(p, p);
+    if (r2 < minR2) {
+      p = sqrt(minR2 / r2) * p;
+      dr = dr * (sqrt(minR2 / minR2));
+    } else if (r2 < fixedR2) {
+      p = sqrt(fixedR2 / r2) * p;
+      dr = dr * (sqrt(fixedR2 / r2));
+    }
+    
+    p = s.xyz * p + pos;
+    dr = dr * abs(s.x) + 1.0;
+  }
+  return (length(p) - 2.0) / dr;
+}
+
+float sceneSDF(vec3 p) {
+  // Apply 3D rotation to the point
+  p = rotateX(rotation.x) * rotateY(rotation.y) * rotateZ(rotation.z) * p;
+  
+  // Center offset
+  p -= center;
+  
+  if (fractalType == 0) {
+    return mandelbulbDE(p, 8.0);
+  } else if (fractalType == 1) {
+    return juliaDE(p, juliaC);
+  } else {
+    return mandelboxDE(p, 2.0);
+  }
+}
+
+vec3 getNormal(vec3 p) {
+  float d = sceneSDF(p);
+  vec2 e = vec2(0.001, 0.0);
+  vec3 n = d - vec3(
+    sceneSDF(p - e.xyy),
+    sceneSDF(p - e.yxy),
+    sceneSDF(p - e.yyx)
+  );
+  return normalize(n);
+}
+
+float rayMarch(vec3 ro, vec3 rd) {
+  float dO = 0.0;
+  
+  for (int i = 0; i < MAX_STEPS; i++) {
+    vec3 p = ro + rd * dO;
+    float dS = sceneSDF(p);
+    dO += dS;
+    if (dO > MAX_DIST || dS < SURF_DIST) break;
+  }
+  
+  return dO;
+}
+
 void main() {
   vec2 uv = (vUv - 0.5) * 2.0;
   uv.x *= resolution.x / resolution.y;
   
-  // Apply 3D rotation
-  vec3 p = vec3(uv, 1.0 / zoom);
-  p = rotateX(rotation.x) * rotateY(rotation.y) * rotateZ(rotation.z) * p;
+  // Camera setup
+  float camDist = 3.0 / zoom;
   
-  // Perspective projection
-  float persp = 1.0 / (p.z + 1.5);
-  vec2 c = p.xy * persp * 1.2 + center;
+  vec3 ro = vec3(0.0, 0.0, camDist);
+  vec3 rd = normalize(vec3(uv, -1.5));
   
-  // Initialize
-  vec2 z = vec2(0.0);
-  vec2 m = c;
+  // Orbit camera rotation
+  float camAngleX = rotation.x * 0.5;
+  float camAngleY = rotation.y * 0.5;
   
-  if (fractalType == 1) {
-    z = c;
-    m = juliaC;
-  } else if (fractalType == 2) {
-    z = c;
-    m = c;
-  }
+  ro = rotateY(camAngleY) * rotateX(camAngleX) * ro;
+  rd = rotateY(camAngleY) * rotateX(camAngleX) * rd;
   
-  float maxIter = 120.0;
-  float iter = 0.0;
+  float d = rayMarch(ro, rd);
   
-  // Main fractal iteration
-  for (float i = 0.0; i < 120.0; i++) {
-    if (fractalType == 2) {
-      // Burning Ship
-      z = vec2(z.x*z.x - z.y*z.y, abs(2.0*z.x*z.y)) + m;
-    } else {
-      // Mandelbrot / Julia
-      z = vec2(z.x*z.x - z.y*z.y, 2.0*z.x*z.y) + m;
-    }
+  vec3 col = vec3(0.0);
+  
+  if (d < MAX_DIST) {
+    vec3 p = ro + rd * d;
+    vec3 n = getNormal(p);
     
-    if (dot(z, z) > 64.0) {
-      iter = i;
-      break;
-    }
-    iter = i;
-  }
-  
-  vec3 col;
-  
-  if (iter >= maxIter - 1.0) {
-    // Inside - dark
-    col = vec3(0.0, 0.0, 0.02);
+    // Lighting
+    vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+    float diff = max(dot(n, lightDir), 0.0);
+    float amb = 0.15;
+    
+    // Rim lighting
+    float rim = 1.0 - max(dot(-rd, n), 0.0);
+    rim = pow(rim, 2.5);
+    
+    // Color based on position and normal
+    float hue = mod(length(p) * 0.3 + rotation.z * 0.1, 1.0);
+    col = palette(hue);
+    
+    // Apply lighting
+    col *= (amb + diff * 0.85);
+    col += rim * vec3(0.4, 0.3, 0.6) * 0.8;
+    
+    // Ambient occlusion approximation
+    col *= 0.7 + 0.3 * (1.0 - d / MAX_DIST);
   } else {
-    // Smooth iteration
-    float smooth = iter + 1.0 - log(log(length(z))) / log(2.0);
-    float t = smooth / 30.0;
-    
-    // Beautiful colors
-    col = palette(t + rotation.y * 0.05);
-    
-    // Glow effect
-    float glow = 1.0 - smooth / maxIter;
-    glow = pow(glow, 0.6);
-    col *= (0.4 + glow * 0.9);
-    
-    // Add inner glow
-    col += vec3(0.01, 0.02, 0.05) * (1.0 - glow);
+    // Background - deep space gradient
+    col = vec3(0.01, 0.01, 0.03);
+    col += vec3(0.05, 0.02, 0.08) * (1.0 - length(uv) * 0.3);
   }
-  
-  // 3D rotation shading
-  col *= 0.85 + 0.15 * sin(rotation.x * 0.5 + rotation.y * 0.3);
   
   // Vignette
-  float vign = 1.0 - length(vUv - 0.5) * 0.6;
+  float vign = 1.0 - length(vUv - 0.5) * 0.5;
   col *= vign;
   
-  // Gamma
-  col = pow(col, vec3(0.95));
+  // Gamma correction
+  col = pow(col, vec3(0.9));
   
   gl_FragColor = vec4(col, 1.0);
 }
@@ -130,21 +229,22 @@ void main() {
 export default function App() {
   const [fractalType, setFractalType] = useState(0);
   const [zoom, setZoom] = useState(1.0);
-  const [centerX, setCenterX] = useState(-0.5);
+  const [centerX, setCenterX] = useState(0);
   const [centerY, setCenterY] = useState(0);
-  const [juliaC, setJuliaC] = useState({ real: -0.7, imag: 0.27015 });
+  const [centerZ, setCenterZ] = useState(0);
+  const [juliaC, setJuliaC] = useState({ x: 0, y: 0, z: 0 });
   const [showControls, setShowControls] = useState(false);
   const [autoRotate, setAutoRotate] = useState(false);
   const [rotation, setRotation] = useState([0, 0, 0]);
   
-  const stateRef = useRef({ fractalType: 0, zoom: 1, centerX: -0.5, centerY: 0, juliaC: { real: -0.7, imag: 0.27015 }, rotation: [0, 0, 0] });
+  const stateRef = useRef({ fractalType: 0, zoom: 1, center: [0, 0, 0], juliaC: [0, 0, 0], rotation: [0, 0, 0] });
   const glRef = useRef(null);
   const programRef = useRef(null);
   const startTime = useRef(Date.now());
   
   useEffect(() => {
-    stateRef.current = { fractalType, zoom, centerX, centerY, juliaC, rotation };
-  }, [fractalType, zoom, centerX, centerY, juliaC, rotation]);
+    stateRef.current = { fractalType, zoom, center: [centerX, centerY, centerZ], juliaC: [juliaC.x, juliaC.y, juliaC.z], rotation };
+  }, [fractalType, zoom, centerX, centerY, centerZ, juliaC, rotation]);
   
   const onContextCreate = (gl) => {
     glRef.current = gl;
@@ -188,15 +288,15 @@ export default function App() {
       const time = (Date.now() - startTime.current) / 1000;
       const rot = state.rotation;
       const currentRot = autoRotate 
-        ? [rot[0] + time * 0.2, rot[1] + time * 0.15, rot[2] + time * 0.1] 
+        ? [rot[0] + time * 0.3, rot[1] + time * 0.2, rot[2] + time * 0.1] 
         : rot;
       
       gl.uniform2f(gl.getUniformLocation(programRef.current, 'resolution'), gl.drawingBufferWidth, gl.drawingBufferHeight);
       gl.uniform1f(gl.getUniformLocation(programRef.current, 'time'), time);
       gl.uniform1f(gl.getUniformLocation(programRef.current, 'zoom'), state.zoom);
-      gl.uniform2f(gl.getUniformLocation(programRef.current, 'center'), state.centerX, state.centerY);
+      gl.uniform3f(gl.getUniformLocation(programRef.current, 'center'), state.center[0], state.center[1], state.center[2]);
       gl.uniform1i(gl.getUniformLocation(programRef.current, 'fractalType'), state.fractalType);
-      gl.uniform2f(gl.getUniformLocation(programRef.current, 'juliaC'), state.juliaC.real, state.juliaC.imag);
+      gl.uniform3f(gl.getUniformLocation(programRef.current, 'juliaC'), state.juliaC[0], state.juliaC[1], state.juliaC[2]);
       gl.uniform3fv(gl.getUniformLocation(programRef.current, 'rotation'), currentRot);
       
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -208,21 +308,19 @@ export default function App() {
     render();
   };
   
-  const handleZoomIn = () => setZoom(z => Math.min(z * 2, 1e10));
-  const handleZoomOut = () => setZoom(z => Math.max(z / 2, 0.5));
+  const handleZoomIn = () => setZoom(z => Math.min(z * 1.5, 50));
+  const handleZoomOut = () => setZoom(z => Math.max(z / 1.5, 0.3));
   
   const nextFractal = () => {
     setFractalType(t => (t + 1) % 3);
     setZoom(1);
-    setCenterX(-0.5);
-    setCenterY(0);
+    setCenterX(0); setCenterY(0); setCenterZ(0);
     setRotation([0, 0, 0]);
   };
   
   const handleReset = () => {
     setZoom(1);
-    setCenterX(-0.5);
-    setCenterY(0);
+    setCenterX(0); setCenterY(0); setCenterZ(0);
     setRotation([0, 0, 0]);
   };
   
@@ -247,20 +345,16 @@ export default function App() {
       const dx = touches[0].pageX - gestureStart.x;
       const dy = touches[0].pageY - gestureStart.y;
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-        // Pan
-        const panSpeed = 0.03 / zoom;
-        setCenterX(x => Math.max(-3, Math.min(3, x + dx * panSpeed)));
-        setCenterY(y => Math.max(-3, Math.min(3, y - dy * panSpeed)));
+        const rotSpeed = 0.01;
+        setRotation(r => [r[0] + dy * rotSpeed, r[1] + dx * rotSpeed, r[2]]);
         setGestureStart({ x: touches[0].pageX, y: touches[0].pageY });
       }
-    } else if (touches.length === 2) {
-      // Pinch zoom handled elsewhere
     }
   };
   
   const handleTouchEnd = () => setGestureStart(null);
   
-  const FRACTAL_NAMES = ['Mandelbrot', 'Julia', 'Burning Ship'];
+  const FRACTAL_NAMES = ['Mandelbulb', 'Julia 3D', 'Mandelbox'];
   
   return (
     <View 
@@ -272,7 +366,7 @@ export default function App() {
       <GLView style={styles.glView} onContextCreate={onContextCreate} />
       
       <TouchableOpacity style={styles.header} onPress={() => setShowControls(!showControls)}>
-        <Text style={styles.title}>🌀 FractalGo</Text>
+        <Text style={styles.title}>💎 FractalGo 3D</Text>
         <Text style={styles.subtitle}>
           {FRACTAL_NAMES[fractalType]} • {zoom < 10 ? zoom.toFixed(2) + 'x' : zoom.toExponential(1)}
           {autoRotate && ' • Auto'}
@@ -281,7 +375,7 @@ export default function App() {
       
       {showControls && (
         <View style={styles.controlsPanel}>
-          <Text style={styles.controlTitle}>Controls</Text>
+          <Text style={styles.controlTitle}>3D Fractals</Text>
           
           <TouchableOpacity style={styles.button} onPress={nextFractal}>
             <Text style={styles.buttonText}>{FRACTAL_NAMES[fractalType]} →</Text>
@@ -322,17 +416,17 @@ export default function App() {
           
           {fractalType === 1 && (
             <View style={styles.sliderRow}>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, real: c.real - 0.05 }))}>
-                <Text style={styles.smallButtonText}>Re−</Text>
+              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, x: c.x - 0.1 }))}>
+                <Text style={styles.smallButtonText}>X−</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, real: c.real + 0.05 }))}>
-                <Text style={styles.smallButtonText}>Re+</Text>
+              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, x: c.x + 0.1 }))}>
+                <Text style={styles.smallButtonText}>X+</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, imag: c.imag - 0.05 }))}>
-                <Text style={styles.smallButtonText}>Im−</Text>
+              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, y: c.y - 0.1 }))}>
+                <Text style={styles.smallButtonText}>Y−</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, imag: c.imag + 0.05 }))}>
-                <Text style={styles.smallButtonText}>Im+</Text>
+              <TouchableOpacity style={styles.smallButton} onPress={() => setJuliaC(c => ({ ...c, y: c.y + 0.1 }))}>
+                <Text style={styles.smallButtonText}>Y+</Text>
               </TouchableOpacity>
             </View>
           )}
