@@ -146,10 +146,10 @@ const FRACTAL_NAMES = ['Mandelbulb', 'Mandelbox', 'Sierpinski'];
 export default function App() {
   const [showControls, setShowControls] = useState(false);
   const [fractalType, setFractalType] = useState(0);
-  const [cameraPos, setCameraPos] = useState([0, 0, 2.5]);
+  const [cameraPos, setCameraPos] = useState([0, 0, 4.0]);
   const [cameraRot, setCameraRot] = useState([0, 0]);
   
-  const stateRef = useRef({ cameraPos: [0, 0, 2.5], cameraRot: [0, 0] });
+  const stateRef = useRef({ cameraPos: [0, 0, 4.0], cameraRot: [0, 0] });
   const glRef = useRef(null);
   const programRef = useRef(null);
   const startTime = useRef(Date.now());
@@ -253,7 +253,7 @@ export default function App() {
   
   const handleTouchEnd = () => setTouchStart(null);
   
-  const handleReset = () => { setCameraPos([0, 0, 2.5]); setCameraRot([0, 0]); velocityRef.current = [0, 0, 0]; };
+  const handleReset = () => { setCameraPos([0, 0, 4.0]); setCameraRot([0, 0]); velocityRef.current = [0, 0, 0]; };
   const cycleFractal = () => setFractalType((fractalType + 1) % 3);
   const setMove = (dir, val) => { movingRef.current = { ...movingRef.current, [dir]: val }; };
   
